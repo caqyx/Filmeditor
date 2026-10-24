@@ -1364,8 +1364,8 @@ const SCENES = {
    ===================================================================== */
 const state = {
   scene: null, sel: null, lastCatId: null, areaMode: false, frame: null,
-  ui: { handles: true, ik: false, free: false, ratio: '1:1', res: '1024', transparent: false, animate: true, legoShow: true,
-    lego: { mode: false, tool: 'place', type: 'b2x4', color: '#C91A09', rot: 0, cat: 'Klocki' } }
+  ui: { handles: true, ik: false, free: false, ratio: '1:1', res: '1024', transparent: false, animate: true, legoShow: true, catOnLego: true,
+    lego: { mode: false, tool: 'place', type: 'b2x4', color: '#C91A09', rot: 0, cat: 'Klocki', useDef: true } }
 };
 const ratioValue = { free: null, '1:1': 1, '4:5': 0.8, '16:9': 16 / 9, '3:4': 0.75 };
 const findLayer = id => state.scene.layers.find(l => l.id === id) || null;
@@ -1949,6 +1949,7 @@ function dragMove(sx, sy) {
   const p = planeHit(sx, sy, drag.normal, drag.p0); if (!p) return;
   const d = p.sub(drag.p0); if (drag.shift) { d.x = 0; d.z = 0; } else d.y = 0;
   const nw = drag.w0.clone().add(d);
+  if (L.type === 'cat' && L.parent == null && !drag.shift && state.ui.catOnLego !== false && legoActive()) nw.y = legoTopAt(nw.x, nw.z);   // kot staje na klockach
   if (L.parent != null && RTL.get(L.parent)) { const par = RTL.get(L.parent).obj; par.updateWorldMatrix(true, false); L.pos = par.worldToLocal(nw).toArray(); }
   else L.pos = nw.toArray();
 }
@@ -2250,7 +2251,28 @@ function occCells(b, fn) {
   const t = LEGO_TYPES[b.t], [W, D] = footprint(b);
   for (let i = 0; i < W; i++) for (let j = 0; j < D; j++) for (let k = 0; k < t.h; k++) fn(`${b.x + i},${b.y + k},${b.z + j}`);
 }
-function rebuildOcc() { legoOcc = new Map(); legoDoc().bricks.forEach((b, i) => occCells(b, key => legoOcc.set(key, i))); }
+let legoTop = new Map();   // "x,z" -> najwyższy poziom (w płytkach) w kolumnie
+function rebuildOcc() {
+  legoOcc = new Map(); legoTop = new Map();
+  legoDoc().bricks.forEach((b, i) => {
+    if (!LEGO_TYPES[b.t]) return;
+    const top = b.y + LEGO_TYPES[b.t].h;
+    occCells(b, key => legoOcc.set(key, i));
+    const [W, D] = footprint(b);
+    for (let a = 0; a < W; a++) for (let c = 0; c < D; c++) { const kk = `${b.x + a},${b.z + c}`; if ((legoTop.get(kk) || 0) < top) legoTop.set(kk, top); }
+  });
+}
+// wysokość powierzchni klocków pod punktem świata (kot ma ok. 3×3 wypustki "stopy")
+function legoTopAt(wx, wz) {
+  const cx = Math.floor(wx / LU), cz = Math.floor(wz / LU); let top = 0;
+  for (let a = -1; a <= 1; a++) for (let c = -1; c <= 1; c++) top = Math.max(top, legoTop.get(`${cx + a},${cz + c}`) || 0);
+  return top * LPH;
+}
+const legoActive = () => { const d = legoDoc(); return state.ui.legoShow !== false && (d.base.on || d.bricks.length > 0); };
+function snapCatsToLego() {
+  rebuildOcc();
+  for (const L of state.scene.layers) if (L.type === 'cat' && L.parent == null) L.pos[1] = legoTopAt(L.pos[0], L.pos[2]);
+}
 function buildBaseplate(base) {
   const S = base.size, half = S / 2, plate = new T.Mesh(at(new T.BoxGeometry(S * LU, LPH, S * LU), 0, -LPH / 2, 0), legoPlastic.clone());
   plate.material.color.set(base.color); plate.userData.legoBase = true; legoGroup.add(plate); legoMeshes.push({ dispose() { plate.geometry.dispose(); plate.material.dispose(); }, isWrap: true, obj: plate });
@@ -2358,7 +2380,7 @@ function setLegoMode(on) {
 }
 function setLegoType(id) {
   const L = state.ui.lego; L.type = id;
-  const def = LEGO_TYPES[id].defColor; if (def) L.color = def;
+  const def = LEGO_TYPES[id].defColor; if (def && L.useDef !== false) L.color = def;
   ghostKey = ''; LegoBar.sync(); scheduleSave();
 }
 
@@ -2400,6 +2422,119 @@ function legoThumb(id, color) {
   renderer.setClearColor('#151d18', 1); renderer.clear(); renderer.render(lthumb.sc, lthumb.cam); renderer.outputColorSpace = T.LinearSRGBColorSpace;
   const x = lthumb.cv.getContext('2d'); x.clearRect(0, 0, 96, 96); x.drawImage(glCanvas, 0, 0);
   const url = lthumb.cv.toDataURL(); lthumbCache.set(key, url); sizeKey = ''; return url;
+}
+
+/* =====================================================================
+   GOTOWE MIEJSCA (generowane z klocków; płyta 48×48, kot stoi w okolicy 0,0)
+   ===================================================================== */
+function presetBuilder() {
+  const bricks = [], occ = new Set();
+  const free = b => { let ok = true; occCells(b, k2 => { if (occ.has(k2)) ok = false; }); return ok; };
+  const put = (t, x, y, z, c, r = 0) => { const b = { t, x, y, z, c, r }; if (!LEGO_TYPES[t] || !free(b)) return false;
+    if (LEGO_TYPES[t].cat === 'Dekoracje' && y === 0 && Math.abs(x + 0.5) < 5 && Math.abs(z + 0.5) < 5) return false;   // wolne miejsce dla kota
+    occCells(b, k2 => occ.add(k2)); bricks.push(b); return true; };
+  // ściana z mijankowo układanych klocków 1×4 / 1×2 / 1×1, z otworami (okna, drzwi)
+  function wall(x0, z0, len, axis, layers, c, y0 = 0, holes = () => false) {
+    for (let l = 0; l < layers; l++) {
+      let i = l % 2 ? 2 : 0;
+      if (i) { for (let s = 0; s < 2; s++) if (!holes(s, l)) put('b1x1', axis === 'x' ? x0 + s : x0, y0 + l * 3, axis === 'x' ? z0 : z0 + s, c); }
+      while (i < len) {
+        let n = [4, 2, 1].find(n2 => i + n2 <= len && [...Array(n2).keys()].every(q => !holes(i + q, l))) || 0;
+        if (!n) { i++; continue; }
+        const t = n === 1 ? 'b1x1' : `b1x${n}`;
+        put(t, axis === 'x' ? x0 + i : x0, y0 + l * 3, axis === 'x' ? z0 : z0 + i, c, axis === 'x' ? 1 : 0);
+        i += n;
+      }
+    }
+  }
+  // podłoga z gładkich płytek (największe pasujące)
+  function floor(x0, z0, w, d, c, t = 't') {
+    for (let x = x0; x < x0 + w; x += 2) for (let z = z0; z < z0 + d; z += 2) {
+      const fw = Math.min(2, x0 + w - x), fd = Math.min(2, z0 + d - z);
+      put(fw === 2 && fd === 2 ? `${t}2x2` : fw === 2 || fd === 2 ? `${t}1x2` : `${t}1x1`, x, 0, z, c, fd === 2 && fw === 1 ? 0 : (fw === 2 && fd === 1 ? 1 : 0));
+    }
+  }
+  return { bricks, put, wall, floor };
+}
+const LEGO_PRESETS = {
+  room: { label: 'Pokój gamingowy', base: '#6C6E68', build(P) {
+    P.floor(-10, -10, 20, 16, '#E4CD9E');
+    P.wall(-10, -11, 20, 'x', 6, '#F4F4F4', 0);
+    P.wall(-11, -11, 17, 'z', 6, '#F4F4F4', 0, (i, l) => i >= 6 && i < 10 && (l === 2 || l === 3));
+    P.floor(-3, -3, 6, 6, '#720E0F', 't');
+    // biurko + stanowisko PC
+    for (const [x, z] of [[-9, -10], [-4, -10], [-9, -8], [-4, -8]]) { P.put('b1x1', x, 1, z, '#1B2A34'); P.put('b1x1', x, 4, z, '#1B2A34'); }
+    P.put('p2x6', -9, 7, -10, '#6C6E68', 1); P.put('p2x6', -9, 7, -9, '#6C6E68', 1);
+    P.put('monitor', -8, 8, -10, '#1B2A34'); P.put('monitor', -6, 8, -10, '#1B2A34');
+    P.put('keyboard', -8, 8, -8, '#1B2A34'); P.put('pc', -2, 1, -10, '#1B2A34');
+    P.put('b2x2', -7, 1, -6, '#1B2A34'); P.put('p2x2', -7, 4, -6, '#C91A09'); P.put('b1x2', -7, 5, -5, '#1B2A34', 1); P.put('b1x2', -7, 8, -5, '#C91A09', 1);
+    // łóżko
+    P.put('b2x8', 4, 1, -10, '#582A12'); P.put('b2x8', 6, 1, -10, '#582A12'); P.put('b2x8', 8, 1, -10, '#582A12');
+    P.put('p2x8', 4, 4, -10, '#F4F4F4'); P.put('p2x8', 6, 4, -10, '#F4F4F4'); P.put('p2x8', 8, 4, -10, '#F4F4F4');
+    P.put('t4x4', 4, 5, -6, '#0055BF'); P.put('t2x4', 8, 5, -6, '#0055BF'); P.put('p2x4', 5, 5, -10, '#F4F4F4', 1);
+    P.put('b1x6', 4, 1, -11, '#582A12', 1); P.put('b1x6', 4, 4, -11, '#582A12', 1);
+    // ściana: plakat, zegar, telewizor; lampa
+    P.put('poster', -1, 7, -10, '#F4F4F4'); P.put('clock', 2, 10, -10, '#F4F4F4'); P.put('lamp', 9, 1, 4, '#1B2A34'); P.put('rock', 7, 1, 2, '#A0A5A9');
+  } },
+  house: { label: 'Domek z ogródkiem', base: '#237841', build(P) {
+    const X = -6, Z = -18, W = 12, D = 9;
+    P.floor(X, Z, W, D, '#A0A5A9');
+    const front = (i, l) => (i >= 5 && i <= 6 && l <= 2) || ((i === 2 || i === 3 || i === 8 || i === 9) && (l === 1 || l === 2));
+    P.wall(X, Z + D - 1, W, 'x', 4, '#F2CD37', 1, front);
+    P.wall(X, Z, W, 'x', 4, '#F2CD37', 1);
+    P.wall(X, Z + 1, D - 2, 'z', 4, '#F2CD37', 1, (i, l) => i >= 3 && i <= 4 && (l === 1 || l === 2));
+    P.wall(X + W - 1, Z + 1, D - 2, 'z', 4, '#F2CD37', 1, (i, l) => i >= 3 && i <= 4 && (l === 1 || l === 2));
+    for (let s = 0; s < 5; s++) for (let x = X - 1 + s; x < X + W + 1 - s; x++) for (let z = Z - 1 + s; z < Z + D + 1 - s; z++) P.put('p1x1', x, 13 + s, z, s % 2 ? '#720E0F' : '#C91A09');
+    P.put('b1x1', X + W - 3, 18, Z + 2, '#6C6E68'); P.put('b1x1', X + W - 3, 21, Z + 2, '#6C6E68');
+    for (let z = Z + D; z < 10; z += 2) P.put('t2x2', X + 5, 0, z, '#E4CD9E');
+    for (let x = -20; x < 20; x += 4) if (x < -2 || x >= 2) P.put('fence', x, 0, 12, '#F4F4F4');
+    for (let z = -6; z < 12; z += 4) { P.put('fence', -21, 0, z, '#F4F4F4', 1); P.put('fence', 20, 0, z, '#F4F4F4', 1); }
+    P.put('tree', -15, 0, -4, '#237841'); P.put('pine', 13, 0, -8, '#184632'); P.put('tree', 14, 0, 6, '#237841');
+    for (let x = -12; x <= -6; x += 2) { P.put('flower', x, 0, 9, ['#C91A09', '#F2CD37', '#FC97AC', '#0055BF'][(x / 2 + 10) % 4 | 0]); }
+    for (let x = 6; x <= 12; x += 2) P.put('flower', x, 0, 9, '#FE8A18');
+    P.put('bush', -10, 0, -12, '#237841'); P.put('bush', 9, 0, -14, '#237841');
+    for (let i = 0; i < 18; i++) P.put('grass', ((i * 37) % 36) - 18, 0, ((i * 23) % 14) - 4, '#BBE90B');
+  } },
+  park: { label: 'Park', base: '#237841', build(P) {
+    for (let x = -24; x < 24; x += 2) P.put('t2x2', x, 0, -1, '#E4CD9E');
+    for (let z = -24; z < 24; z += 2) if (z < -1 || z > 0) P.put('t2x2', -1, 0, z, '#E4CD9E');
+    for (let x = 8; x < 16; x += 2) for (let z = 8; z < 16; z += 2) P.put('t2x2', x, 0, z, '#36AEBF');
+    for (let i = 0; i < 9; i++) { P.put('rock', 6 + i, 0, 6, '#A0A5A9'); P.put('rock', 6 + i, 0, 16, '#6C6E68'); }
+    const bench = (x, z, r) => { P.put('b1x1', x, 0, z, '#1B2A34'); P.put('b1x1', r ? x : x + 3, 0, r ? z + 3 : z, '#1B2A34'); P.put(r ? 'p1x4' : 'p1x4', x, 3, z, '#582A12', r ? 0 : 1); };
+    bench(-8, 2, 0); bench(4, -5, 0); bench(2, 6, 1); bench(-6, -10, 1);
+    for (const [x, z] of [[2, 2], [-4, 2], [2, -4], [-4, -4], [2, 14], [-4, -18], [16, 2], [-18, -4]]) P.put('lamp', x, 0, z, '#1B2A34');
+    const trees = [[-16, -16], [-10, -20], [-20, 8], [-14, 14], [16, -16], [20, -8], [-8, 18], [18, 20], [10, -20], [-20, -2]];
+    trees.forEach(([x, z], i) => P.put(i % 3 ? 'tree' : 'pine', x, 0, z, i % 3 ? '#237841' : '#184632'));
+    for (let i = 0; i < 14; i++) P.put('bush', ((i * 29) % 40) - 20, 0, ((i * 17) % 40) - 20, i % 2 ? '#237841' : '#184632');
+    for (let i = 0; i < 26; i++) P.put('flower', ((i * 13) % 44) - 22, 0, ((i * 31) % 44) - 22, ['#C91A09', '#F2CD37', '#FC97AC', '#E1D5ED', '#FE8A18'][i % 5]);
+    for (let i = 0; i < 30; i++) P.put('grass', ((i * 19) % 46) - 23, 0, ((i * 41) % 46) - 23, '#BBE90B');
+  } },
+  cafe: { label: 'Kawiarnia', base: '#A0A5A9', build(P) {
+    const X = -8, Z = -20, W = 16, D = 9;
+    P.floor(X, Z, W, D, '#E4CD9E');
+    const front = (i, l) => (i >= 7 && i <= 8 && l <= 2) || ((i >= 2 && i <= 5 || i >= 10 && i <= 13) && (l === 1 || l === 2));
+    P.wall(X, Z + D - 1, W, 'x', 4, '#582A12', 1, front);
+    P.wall(X, Z, W, 'x', 4, '#582A12', 1); P.wall(X, Z + 1, D - 2, 'z', 4, '#582A12', 1); P.wall(X + W - 1, Z + 1, D - 2, 'z', 4, '#582A12', 1);
+    for (let x = X - 1; x < X + W + 1; x += 2) for (let z = Z - 1; z < Z + D + 1; z += 2) P.put('p2x2', x, 13, z, '#1B2A34');
+    P.put('sign', X + 6, 14, Z + D - 1, '#0A3463');
+    P.put('b1x6', X + 3, 1, Z + 3, '#F4F4F4', 1); P.put('b1x6', X + 3, 4, Z + 3, '#F4F4F4', 1); P.put('panel', X + 4, 7, Z + 2, '#6C6E68');
+    P.put('monitor', X + 10, 1, Z + 1, '#1B2A34'); P.put('clock', X + 12, 6, Z + 1, '#F4F4F4');
+    for (let x = -12; x < 12; x += 2) for (let z = -10; z < 4; z += 2) P.put('t2x2', x, 0, z, (x + z) % 4 === 0 ? '#F4F4F4' : '#A0A5A9');
+    const table = (x, z) => { P.put('b1x1', x, 1, z, '#1B2A34'); P.put('b1x1', x, 4, z, '#1B2A34'); P.put('p2x2', x, 7, z, '#F4F4F4'); P.put('b1x1', x - 2, 1, z, '#C91A09'); P.put('p1x1', x - 2, 4, z, '#C91A09'); P.put('b1x1', x + 2, 1, z + 1, '#C91A09'); P.put('p1x1', x + 2, 4, z + 1, '#C91A09'); };
+    table(-8, -7); table(6, -7); table(-8, 0); table(7, 1);
+    for (const x of [-12, -6, 6, 11]) P.put('lamp', x, 1, -10, '#1B2A34');
+    for (let x = X; x < X + W; x += 2) if (x < X + 6 || x > X + 9) { P.put('b1x2', x, 0, Z + D, '#582A12', 1); P.put('flower', x, 3, Z + D, '#C91A09'); P.put('flower', x + 1, 3, Z + D, '#F2CD37'); }
+    P.put('tree', -18, 0, -6, '#237841'); P.put('tree', 16, 0, -4, '#237841'); P.put('bush', -18, 0, 4, '#237841'); P.put('bush', 15, 0, 6, '#237841');
+  } }
+};
+function loadLegoPreset(id) {
+  const p = LEGO_PRESETS[id], doc = legoDoc();
+  if (doc.bricks.length && !confirm(`Wczytać "${p.label}"? Obecne klocki zostaną zastąpione.`)) return;
+  const P = presetBuilder(); p.build(P);
+  doc.bricks = P.bricks; doc.base = { on: true, size: 48, color: p.base };
+  legoDirty = true; if (state.ui.catOnLego !== false) snapCatsToLego();
+  setCameraTo({ theta: 25, phi: 32, dist: 260, target: [0, 10, -4] });
+  commit(); UI.rebuild(); LegoBar.sync(); requestRender(); toast(`Wczytano: ${p.label} (${P.bricks.length} klocków)`);
 }
 
 /* =====================================================================
@@ -2591,6 +2726,10 @@ const UI = (() => {
   function buildLego(body) {
     const L = state.ui.lego, doc = legoDoc();
     body.append(h('div', { class: 'btns' }, btn(L.mode ? 'Zakończ budowanie' : 'Włącz budowanie', () => setLegoMode(!L.mode), L.mode ? 'on' : 'accent')));
+    sub(body, 'Gotowe miejsca');
+    body.append(h('div', { class: 'grid g3', style: 'grid-template-columns:repeat(2,1fr)' }, Object.keys(LEGO_PRESETS).map(id => btn(LEGO_PRESETS[id].label, () => loadLegoPreset(id)))));
+    check(body, 'Kot staje na klockach', () => state.ui.catOnLego, v => { state.ui.catOnLego = v; if (v) snapCatsToLego(); }, false, false);
+    body.append(h('div', { class: 'btns' }, btn('Postaw kota na klockach', () => { snapCatsToLego(); commit(); requestRender(); syncPending = true; })));
     if (!L.mode) {
       body.append(h('div', { class: 'note' }, `Mapa: ${doc.bricks.length} klocków. Włącz budowanie, wybierz klocek i kolor, a potem tapnij w płytę bazową lub w inny klocek.`));
       check(body, 'Pokaż mapę LEGO', () => state.ui.legoShow, v => { state.ui.legoShow = v; legoDirty = true; }, false, true);
@@ -2606,6 +2745,7 @@ const UI = (() => {
     }
     body.append(grid);
     sub(body, 'Kolor');
+    check(body, 'Domyślny kolor dekoracji', () => L.useDef !== false, v => { L.useDef = v; }, false, true);
     body.append(h('div', { class: 'lcols' }, LEGO_COLORS.map(([n, c]) => h('button', { class: L.color === c ? 'on' : '', title: n, style: `background:${c}`, onclick: () => { L.color = c; LegoBar.sync(); rebuild(); } }))));
     sub(body, 'Płyta bazowa');
     check(body, 'Płyta bazowa', () => doc.base.on, v => { doc.base.on = v; legoDirty = true; });
@@ -2685,7 +2825,7 @@ function init() {
   state.lastCatId = firstCat ? firstCat.id : null; state.sel = state.lastCatId;
   fitRenderer(); wireTopBar(); UI.init(); commit(); requestRender();
   new ResizeObserver(() => requestRender()).observe(glCanvas);
-  window.__pfp3d = { legoDoc, LEGO_TYPES, setLegoMode, setLegoType, legoAct, placementAt, state, cam, hist, RTL, scene, camera, renderer, fx, jointHandles, selLayer, layerScreenRect, outputSize, setEnv, applyPose, POSES, aimBone, addAccessory, addVehicle, seatCat, exportPNG, setAreaMode };
+  window.__pfp3d = { loadLegoPreset, legoTopAt, snapCatsToLego, legoDoc, LEGO_TYPES, setLegoMode, setLegoType, legoAct, placementAt, state, cam, hist, RTL, scene, camera, renderer, fx, jointHandles, selLayer, layerScreenRect, outputSize, setEnv, applyPose, POSES, aimBone, addAccessory, addVehicle, seatCat, exportPNG, setAreaMode };
 }
 init();
 })();
