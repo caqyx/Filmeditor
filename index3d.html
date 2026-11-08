@@ -750,13 +750,13 @@ function airHull(cut) {
   const { N } = AIR, xs = [];
   for (let x = -64; x < -30; x += 2) xs.push(x);
   xs.push(-30, -29, -27.4);
-  for (let x = -26; x <= 34.5; x += 2.6) xs.push(x, x + 1.1);
+  for (let x = -26; x <= 34.5; x += 2.6) xs.push(x, x + 1.6);
   for (let x = 36; x <= 58; x += 1.5) xs.push(x);
   xs.push(58); xs.sort((a, b) => a - b);
   const X = [...new Set(xs.map(v => +v.toFixed(2)))];
   const ring = X.map(x => airSection(x));
   const P = (i, k) => { const a = k / N * Math.PI * 2, s = ring[i]; return [X[i], s.cy + s.r * Math.cos(a), s.r * Math.sin(a)]; };
-  const win = (x0, x1) => { for (let x = -26; x <= 34.5; x += 2.6) if (x0 >= x - 0.01 && x1 <= x + 1.11) return true; return false; };
+  const win = (x0, x1) => { for (let x = -26; x <= 34.5; x += 2.6) if (x0 >= x - 0.01 && x1 <= x + 1.61) return true; return false; };
   const out = {};
   const add = (key, i, k) => {
     const a = P(i, k), b = P(i + 1, k), c = P(i + 1, (k + 1) % N), d = P(i, (k + 1) % N);
@@ -769,7 +769,7 @@ function airHull(cut) {
       const km = Math.min(k, N - 1 - k);                       // symetria lewa/prawa burta
       if (cut && k <= 10 && xm > -29 && xm < 52.5) continue;   // przekrój: zdjęta prawa (+z) połowa kabiny
       let key = 'skin';
-      if (km === 7 && win(x0, x1)) key = 'hole';
+      if ((km === 6 || km === 7) && win(x0, x1)) key = 'hole';
       else if (km >= 2 && km <= 5 && x0 >= 51 && x1 <= 55.6) key = 'hole';   // szyby kokpitu
       else if (km >= 6 && km <= 9 && ((x0 >= 37.4 && x1 <= 39.1) || (x0 >= -29.1 && x1 <= -27.3))) key = 'door';
       else if (km === 8 && xm < 52) key = 'stripe';
