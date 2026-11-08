@@ -717,6 +717,172 @@ function renderPipeline(w, h, viewZoom, toScreen) {
   compMat.uniforms.gain.value = fx.gain;
   renderer.setRenderTarget(null); renderer.setClearColor(0x000000, 0); renderer.clear(); renderer.render(quadScene, quadCam);
 }
+/* =====================================================================
+   SAMOLOT PASAŻERSKI: pusty kadłub z prawdziwymi oknami, kabina z fotelami,
+   schowkami, oświetleniem, kuchnią, toaletami i kokpitem. Oś +X = dziób.
+   ===================================================================== */
+const AIR = { R: 6.5, CY: 10, N: 32 };
+AIR.FY = AIR.CY - 3.2;                     // poziom podłogi kabiny
+function airSection(x) {                   // środek i promień kadłuba w przekroju x
+  const { R, CY } = AIR;
+  if (x > 36) { const s = Math.min(1, (x - 36) / 22); return { cy: CY - 1.5 * s * s, r: R * Math.sqrt(Math.max(0, 1 - s * s)) }; }
+  if (x < -30) { const s = Math.min(1, (-30 - x) / 34); return { cy: CY + 2.6 * s, r: R - 5.7 * Math.pow(s, 1.4) }; }
+  return { cy: CY, r: R };
+}
+// geometria z wielu brył (każda: geometria już przesunięta) -> jedna, dla małej liczby draw calli
+function mergeGeos(list) {
+  const pos = [], nor = [];
+  for (const g0 of list) {
+    const g = g0.index ? g0.toNonIndexed() : g0;
+    if (!g.attributes.normal) g.computeVertexNormals();
+    pos.push(...g.attributes.position.array); nor.push(...g.attributes.normal.array);
+  }
+  const out = new T.BufferGeometry();
+  out.setAttribute('position', new T.Float32BufferAttribute(pos, 3)); out.setAttribute('normal', new T.Float32BufferAttribute(nor, 3));
+  return out;
+}
+const boxAt = (w, h, d, x, y, z, rx = 0, ry = 0, rz = 0) => {
+  const g = new T.BoxGeometry(w, h, d);
+  g.applyMatrix4(new T.Matrix4().makeRotationFromEuler(new T.Euler(rx, ry, rz))); g.translate(x, y, z); return g;
+};
+// kadłub jako siatka pierścieni; cell(i,k) -> klucz materiału, 'hole' (szyba) albo null (wycięte)
+function airHull(cut) {
+  const { N } = AIR, xs = [];
+  for (let x = -64; x < -30; x += 2) xs.push(x);
+  xs.push(-30, -29, -27.4);
+  for (let x = -26; x <= 34.5; x += 2.6) xs.push(x, x + 1.1);
+  for (let x = 36; x <= 58; x += 1.5) xs.push(x);
+  xs.push(58); xs.sort((a, b) => a - b);
+  const X = [...new Set(xs.map(v => +v.toFixed(2)))];
+  const ring = X.map(x => airSection(x));
+  const P = (i, k) => { const a = k / N * Math.PI * 2, s = ring[i]; return [X[i], s.cy + s.r * Math.cos(a), s.r * Math.sin(a)]; };
+  const win = (x0, x1) => { for (let x = -26; x <= 34.5; x += 2.6) if (x0 >= x - 0.01 && x1 <= x + 1.11) return true; return false; };
+  const out = {};
+  const add = (key, i, k) => {
+    const a = P(i, k), b = P(i + 1, k), c = P(i + 1, (k + 1) % N), d = P(i, (k + 1) % N);
+    (out[key] = out[key] || []).push(...a, ...c, ...b, ...a, ...d, ...c);
+    if (key !== 'hole') out.inner = out.inner || [], out.inner.push(...a, ...c, ...b, ...a, ...d, ...c);
+  };
+  for (let i = 0; i < X.length - 1; i++) {
+    const x0 = X[i], x1 = X[i + 1], xm = (x0 + x1) / 2;
+    for (let k = 0; k < N; k++) {
+      const km = Math.min(k, N - 1 - k);                       // symetria lewa/prawa burta
+      if (cut && k <= 10 && xm > -29 && xm < 52.5) continue;   // przekrój: zdjęta prawa (+z) połowa kabiny
+      let key = 'skin';
+      if (km === 7 && win(x0, x1)) key = 'hole';
+      else if (km >= 2 && km <= 5 && x0 >= 51 && x1 <= 55.6) key = 'hole';   // szyby kokpitu
+      else if (km >= 6 && km <= 9 && ((x0 >= 37.4 && x1 <= 39.1) || (x0 >= -29.1 && x1 <= -27.3))) key = 'door';
+      else if (km === 8 && xm < 52) key = 'stripe';
+      else if (km >= 13) key = 'belly';
+      add(key, i, k);
+    }
+  }
+  const geos = {};
+  for (const key in out) { const g = new T.BufferGeometry(); g.setAttribute('position', new T.Float32BufferAttribute(out[key], 3)); g.computeVertexNormals(); geos[key] = g; }
+  return geos;
+}
+function airSeat(list, x, y, z, w, big) {
+  const head = list.head, fab = list.fab, dk = list.dark, scr = list.screen;
+  const d = big ? 2.3 : 1.7, bh = big ? 3.0 : 2.6;
+  fab.push(boxAt(d, 0.45, w * 0.9, x, y + 1.3, z));                              // siedzisko
+  fab.push(boxAt(0.4, bh, w * 0.9, x - d / 2, y + 1.5 + bh / 2, z, 0, 0, 0.16));  // oparcie
+  head.push(boxAt(0.44, 0.75, w * 0.8, x - d / 2 - 0.42, y + 1.3 + bh, z, 0, 0, 0.16));
+  for (const s of [-1, 1]) dk.push(boxAt(d * 0.85, 0.18, 0.2, x - 0.1, y + 2.05, z + s * w * 0.47));
+  dk.push(boxAt(0.25, 1.1, w * 0.7, x, y + 0.55, z));
+  scr.push(boxAt(0.06, 0.55, w * 0.5, x - d / 2 - 0.26, y + 1.4 + bh * 0.62, z, 0, 0, 0.16));   // ekran dla rzędu za
+}
+function airBulkhead(x, doorW, doorH, cut) {
+  const s = airSection(x), r = s.r - 0.05, sh = new T.Shape();
+  if (cut) { sh.moveTo(0, -r); sh.absarc(0, 0, r, -Math.PI / 2, Math.PI / 2, true); sh.lineTo(0, -r); }
+  else sh.absarc(0, 0, r, 0, Math.PI * 2, false);
+  const fy = AIR.FY - s.cy, hole = new T.Path();
+  hole.moveTo(-doorW / 2, fy); hole.lineTo(-doorW / 2, fy + doorH); hole.lineTo(doorW / 2, fy + doorH); hole.lineTo(doorW / 2, fy);
+  if (!cut) sh.holes.push(hole);
+  const g = new T.ShapeGeometry(sh, 24); g.rotateY(Math.PI / 2); g.translate(x, s.cy, 0); return g;
+}
+function buildAirliner(mats, g, cut) {
+  const { CY, FY } = AIR;
+  const white = stdMat('#f3f5f7'), accent = mats.body, belly = stdMat('#c4cbd2'), door = stdMat('#d9dee3');
+  const inner = stdMat('#e9e4d8', { side: T.BackSide }), panel = stdMat('#e9e4d8', { side: T.DoubleSide });
+  const carpet = stdMat('#4b5263'), aisle = stdMat('#2f3f66'), fab = stdMat('#2d4f8f'), fabB = stdMat('#3d434c'), head = stdMat('#eef0f2');
+  const dark = stdMat('#22262b'), steel = mats.metal, screen = stdMat('#0d1a2a', { emissive: '#2f7fd6', emissiveIntensity: 0.55 });
+  const glowW = stdMat('#fff6e0', { emissive: '#fff1cf', emissiveIntensity: 0.8 }), glowB = stdMat('#cfe6ff', { emissive: '#bcdcff', emissiveIntensity: 0.6 });
+  // --- kadłub
+  const hull = airHull(cut);
+  const skinMat = { skin: white, stripe: accent, belly, door };
+  for (const k in skinMat) if (hull[k]) g.add(new T.Mesh(hull[k], skinMat[k]));
+  if (hull.hole) g.add(new T.Mesh(hull.hole, mats.glass));
+  g.add(new T.Mesh(hull.inner, inner));
+  // --- podłoga i wykładzina
+  g.add(mesh(new T.BoxGeometry(73, 0.3, 11.1), carpet, 7, FY - 0.15, 0));
+  g.add(mesh(new T.BoxGeometry(60, 0.04, 1.8), aisle, 4, FY + 0.02, 0));
+  // --- fotele (scalone w kilka siatek)
+  const L = { fab: [], head: [], dark: [], screen: [] }, LB = { fab: [], head: [], dark: [], screen: [] };
+  for (const x of [32.2, 28.6]) for (const z of [-4.15, -2.05, 2.05, 4.15]) airSeat(LB, x, FY, z, 2.1, true);
+  for (let x = 24.2, row = 0; x > -25; x -= 2.6, row++) for (const z of [-4.7, -3.2, -1.7, 1.7, 3.2, 4.7]) airSeat(L, x, FY, z, 1.5, false);
+  g.add(new T.Mesh(mergeGeos(L.fab), fab), new T.Mesh(mergeGeos(LB.fab), fabB));
+  g.add(new T.Mesh(mergeGeos([...L.head, ...LB.head]), head), new T.Mesh(mergeGeos([...L.dark, ...LB.dark]), dark), new T.Mesh(mergeGeos([...L.screen, ...LB.screen]), screen));
+  // --- schowki bagażowe, listwy świetlne, sufit
+  const bins = [], lights = [];
+  for (const s of [-1, 1]) {
+    if (cut && s > 0) continue;
+    bins.push(boxAt(61, 1.5, 2.2, 4, CY + 3.25, s * 4.0, -s * 0.38));
+    lights.push(boxAt(61, 0.08, 0.35, 4, CY + 2.35, s * 3.15));
+  }
+  if (bins.length) g.add(new T.Mesh(mergeGeos(bins), panel), new T.Mesh(mergeGeos(lights), glowW));
+  g.add(mesh(new T.BoxGeometry(61, 0.1, 1.4), glowB, 4, CY + 5.95, 0));
+  // --- przegrody, kuchnia, toalety
+  g.add(new T.Mesh(airBulkhead(36.4, 2.2, 5.2, cut), panel), new T.Mesh(airBulkhead(43.6, 1.6, 5.4, cut), panel), new T.Mesh(airBulkhead(26.4, 2.2, 5.6, cut), panel));
+  const galley = [];
+  for (const s of [-1, 1]) { galley.push(boxAt(3.4, 4.2, 1.8, 40.6, FY + 2.1, s * 4.0)); galley.push(boxAt(3.4, 0.15, 2.0, 40.6, FY + 4.3, s * 3.95)); }
+  g.add(new T.Mesh(mergeGeos(galley), steel));
+  for (const s of [-1, 1]) {
+    g.add(mesh(new T.BoxGeometry(2.4, 6, 3.2), panel, -28.2, FY + 3, s * 3.3));
+    g.add(mesh(new T.BoxGeometry(0.05, 4.6, 1.6), door, -26.98, FY + 2.5, s * 3.3));
+  }
+  // --- kokpit
+  g.add(mesh(new T.BoxGeometry(9, 0.4, 7.4), carpet, 48.2, FY + 0.2, 0));
+  for (const z of [-1.6, 1.6]) {
+    g.add(mesh(new T.BoxGeometry(1.9, 0.5, 1.6), dark, 48.4, FY + 1.75, z));
+    g.add(mesh(new T.BoxGeometry(0.45, 2.8, 1.6), dark, 47.3, FY + 3.3, z, 0, 0, 0.14));
+    g.add(mesh(new T.BoxGeometry(0.6, 1.3, 0.6), steel, 48.4, FY + 0.9, z));
+    g.add(mesh(new T.CylinderGeometry(0.12, 0.12, 0.9, 6), dark, 49.6, FY + 2.6, z * 1.9, 0.3 * Math.sign(z)));
+  }
+  g.add(mesh(new T.BoxGeometry(1.0, 1.9, 7.2), dark, 51.3, CY - 0.9, 0, 0, 0, 0.25));       // panel przyrządów
+  g.add(mesh(new T.BoxGeometry(1.7, 0.28, 7.4), dark, 51.0, CY + 0.25, 0));                  // osłona przed słońcem
+  const scr = [];
+  for (const z of [-2.7, -0.95, 0.95, 2.7]) scr.push(boxAt(0.06, 1.0, 1.35, 50.8, CY - 0.75, z, 0, 0, 0.25));
+  g.add(new T.Mesh(mergeGeos(scr), stdMat('#081420', { emissive: '#3aa2ff', emissiveIntensity: 0.75 })));
+  g.add(mesh(new T.BoxGeometry(2.6, 1.5, 1.1), dark, 49.4, FY + 1.15, 0));                   // konsola środkowa
+  for (const z of [-0.25, 0.25]) g.add(mesh(new T.BoxGeometry(0.15, 0.7, 0.15), steel, 49.6, FY + 2.2, z, 0, 0, -0.3));
+  g.add(mesh(new T.BoxGeometry(3.2, 0.4, 2.8), dark, 49.5, CY + 3.0, 0, 0, 0, -0.2));         // panel nad głową
+  g.add(mesh(new T.BoxGeometry(2.6, 0.06, 2.2), stdMat('#201509', { emissive: '#ffb347', emissiveIntensity: 0.5 }), 49.5, CY + 2.78, 0, 0, 0, -0.2));
+  // --- skrzydła z silnikami
+  for (const s of [-1, 1]) {
+    const wing = mesh(triPrism([[14, 0], [-9, 33 * s], [-14, 33 * s], [-4, 0]], 1.0), white, 0, CY - 4.6, 0, -0.09 * s);
+    g.add(wing);
+    g.add(mesh(finGeo([[0, 0], [5, 0], [0.5, 5.5], [-1, 5.5]], 0.4), accent, -14, CY - 4.6 + 33 * 0.09 + 0.3, 33 * s));
+    g.add(mesh(new T.SphereGeometry(0.35, 6, 4), s > 0 ? stdMat('#40ff70', { emissive: '#30ff60', emissiveIntensity: 0.9 }) : mats.red, -12, CY - 4.2 + 33 * 0.09, 33.6 * s));
+    const ez = 12 * s, ey = CY - 4.6 + 12 * 0.09 - 2.7;
+    g.add(mesh(lathe([[1.9, -5], [2.4, -3.5], [2.65, 0], [2.55, 3], [2.6, 4.4], [2.35, 4.8]], 14), white, 5, ey, ez));
+    g.add(mesh(new T.CylinderGeometry(2.2, 2.2, 0.2, 14), dark, 9.4, ey, ez, 0, 0, Math.PI / 2));
+    g.add(mesh(new T.ConeGeometry(0.75, 1.4, 10), steel, 10.1, ey, ez, 0, 0, -Math.PI / 2));
+    g.add(mesh(new T.ConeGeometry(1.4, 3, 10), steel, -1.4, ey, ez, 0, 0, Math.PI / 2));
+    g.add(mesh(new T.BoxGeometry(6, 1.8, 0.5), white, 4, ey + 2.6, ez));
+  }
+  // --- usterzenie
+  const ts = airSection(-56);
+  g.add(mesh(finGeo([[0, 0], [11, 0], [-1.5, 14], [-6, 14]], 0.8), accent, -62, ts.cy + ts.r - 0.6, 0));
+  for (const s of [-1, 1]) g.add(mesh(triPrism([[-53, 0.6 * s], [-61.5, 12 * s], [-64.5, 12 * s], [-60, 0.6 * s]], 0.6), white, 0, ts.cy - 0.2, 0));
+  g.add(mesh(new T.CylinderGeometry(0.45, 0.6, 1.4, 8), dark, -64.4, airSection(-64).cy, 0, 0, 0, Math.PI / 2));
+  // --- podwozie
+  const gear = (x, z, n, r) => {
+    const top = airSection(x).cy - airSection(x).r + 0.5;
+    g.add(mesh(new T.CylinderGeometry(0.28, 0.28, top - r, 6), steel, x, r + (top - r) / 2, z));
+    for (let a = 0; a < n; a++) for (const dz of [-0.75, 0.75]) g.add(wheelRaw(x + (n > 1 ? (a - 0.5) * 2.8 : 0), r, z + dz, r, mats));
+  };
+  gear(46, 0, 1, 0.95); gear(-1, -5.2, 2, 1.25); gear(-1, 5.2, 2, 1.25);
+}
 
 /* =====================================================================
    AKCESORIA 3D (przypięte do kości; współrzędne w układzie głowy / szyi)
@@ -952,7 +1118,10 @@ const PLANE_SPECS = [
       for (const z of [-2.6, 2.6]) g.add(mesh(finGeo([[-3, 0], [3, 0], [-1, 9]], 0.7), mats.shade, -24, 8, z * 1.0));
       const canopy = mesh(new T.SphereGeometry(3, 10, 6, 0, Math.PI * 2, 0, Math.PI / 2), mats.glass, 12, 10.4, 0); canopy.scale.set(2.2, 1.15, 1); g.add(canopy);
       g.add(mesh(new T.CylinderGeometry(2.2, 2.6, 3, 8), mats.dark, -27, 7, 0, 0, 0, Math.PI / 2));
-    } }
+    } },
+  { name: 'Pasażerski', snaps: [['Fotel pilota', 48.4, AIR.FY + 2.0, 0.13, 1.6, 90], ['Biznes 1F', 32.2, AIR.FY + 1.55, 0.14, 4.15, 90], ['Ekonomiczna przy oknie', 13.8, AIR.FY + 1.55, 0.13, 4.7, 90],
+      ['Ekonomiczna środek', 13.8, AIR.FY + 1.55, 0.13, 3.2, 90], ['Przejście', 6, AIR.FY + 0.05, 0.13, 0, 90], ['Kuchnia', 40.6, AIR.FY + 0.05, 0.13, 0, 90], ['Na dachu', 10, 16.5, 0, 0, 90]],
+    build(m, mats, g, cut) { buildAirliner(mats, g, cut); } }
 ];
 function wheelRaw(x, y, z, r, mats) {
   const g = new T.CylinderGeometry(r, r, 1.1, 10); g.rotateX(Math.PI / 2);
@@ -988,11 +1157,11 @@ function vehicleMats(color) {
     lamp: stdMat('#fff3a8', { emissive: '#fff3a8', emissiveIntensity: 0.9 }), red: stdMat('#ff4040', { emissive: '#ff2020', emissiveIntensity: 0.6 })
   };
 }
-function buildVehicle(kind, variant, color) {
+function buildVehicle(kind, variant, color, cut) {
   const g = new T.Group(), mats = vehicleMats(color);
   let snaps;
   if (kind === 'plane') {
-    const s = PLANE_SPECS[variant]; s.build(mats.body, mats, g); snaps = s.snaps.map(([n, x, y, sc, z]) => ({ name: n, pos: V3(x, y, z || 0), scale: sc }));
+    const s = PLANE_SPECS[variant]; s.build(mats.body, mats, g, cut); snaps = s.snaps.map(([n, x, y, sc, z, ry]) => ({ name: n, pos: V3(x, y, z || 0), scale: sc, ry: ry || 0 }));
   } else {
     const s = VEH_SPECS[kind][variant];
     for (const [tone, pts, depth, bevel] of s.parts) g.add(new T.Mesh(profileGeo(pts, depth, bevel), mats[tone]));
@@ -1006,7 +1175,7 @@ function buildVehicle(kind, variant, color) {
   return { group: g, mats, snaps };
 }
 const VEH_LABEL = { car: 'Samochód', moto: 'Motocykl', plane: 'Samolot' };
-const VEH_NAMES = { car: ['Sedan', 'Sportowy'], moto: ['Cruiser', 'Sportowy'], plane: ['Śmigłowy', 'Odrzutowiec'] };
+const VEH_NAMES = { car: ['Sedan', 'Sportowy'], moto: ['Cruiser', 'Sportowy'], plane: ['Śmigłowy', 'Odrzutowiec', 'Pasażerski'] };
 const VEH_COLOR = { car: '#4aa8ff', moto: '#ff7a3d', plane: '#dfe6ee' };
 
 /* =====================================================================
@@ -1417,8 +1586,8 @@ function buildRuntime(L) {
     const rig = buildCatRig(); rig.meshes.forEach(m => { m.userData.layerId = L.id; });
     rig.group.userData.layerId = L.id; rt = { obj: rig.group, rig };
   } else if (L.type === 'veh') {
-    const v = buildVehicle(L.kind, L.variant, L.color);
-    v.group.traverse(m => { m.userData.layerId = L.id; }); rt = { obj: v.group, veh: v, key: L.kind + L.variant };
+    const v = buildVehicle(L.kind, L.variant, L.color, !!L.cut);
+    v.group.traverse(m => { m.userData.layerId = L.id; }); rt = { obj: v.group, veh: v, key: L.kind + L.variant + (L.cut ? 'c' : '') };
   } else {
     const catRt = RTL.get(L.catId); if (!catRt) return null;
     const d = ACC_DEFS[L.kind], acc = buildAccessory(L.kind, L.color), holder = new T.Group();
@@ -1433,7 +1602,7 @@ function ensureRuntimes() {
   const order = { cat: 0, veh: 1, acc: 2 };
   for (const L of [...state.scene.layers].sort((a, b) => order[a.type] - order[b.type])) {
     let rt = RTL.get(L.id);
-    if (rt && L.type === 'veh' && rt.key !== L.kind + L.variant) { rt.obj.removeFromParent(); disposeObj(rt.obj); RTL.delete(L.id); rt = null; }
+    if (rt && L.type === 'veh' && rt.key !== L.kind + L.variant + (L.cut ? 'c' : '')) { rt.obj.removeFromParent(); disposeObj(rt.obj); RTL.delete(L.id); rt = null; }
     if (!rt) { rt = buildRuntime(L); if (rt) (rt.obj.parent || layerGroup).add(rt.obj); }
   }
 }
@@ -1592,6 +1761,7 @@ function addCat() { const L = makeCat(state.scene); L.pos = spawnPos(); addLayer
 function addVehicle(kind, variant) {
   const L = makeVeh(kind, variant); L.pos = spawnPos();
   if (kind === 'plane') L.pos[1] = 0;
+  if (kind === 'plane' && variant === 2) { L.color = '#1f5fbf'; L.cut = true; }
   addLayer(L);
 }
 function addAccessory(kind) {
@@ -1633,7 +1803,7 @@ function moveLayer(L, mode) {
 function seatCat(cat, veh) {
   const sp = RTL.get(veh.id).veh.snaps[veh.snap] || RTL.get(veh.id).veh.snaps[0];
   const ws = Math.abs(worldScaleOf(cat)), vs = Math.abs(worldScaleOf(veh));
-  cat.parent = veh.id; cat.pos = sp.pos.toArray(); cat.rot = [0, 0, 0]; cat.flip = false; cat.scale = sp.scale || Math.min(ws / vs, 0.8);
+  cat.parent = veh.id; cat.pos = sp.pos.toArray(); cat.rot = [0, sp.ry || 0, 0]; cat.flip = false; cat.scale = sp.scale || Math.min(ws / vs, 0.8);
   state.lastCatId = cat.id; UI.rebuild(); commit();
   applyPose(cat, POSES.sit);
 }
@@ -2715,6 +2885,7 @@ const UI = (() => {
     const L = selLayer();
     if (L && L.type === 'veh') {
       select(body, 'Wariant', VEH_NAMES[L.kind].map((n, i) => [i, n]), () => L.variant, v => { L.variant = +v; L.snap = 0; }, true);
+      if (L.kind === 'plane' && L.variant === 2) check(body, 'Przekrój (pokaż wnętrze)', () => L.cut, v => { L.cut = v; }, true);
       const rt = RTL.get(L.id), snaps = rt ? rt.veh.snaps : [];
       select(body, 'Punkt zaczepienia', snaps.map((s, i) => [i, s.name]), () => L.snap, v => { L.snap = +v; });
       const cat = targetCat();
